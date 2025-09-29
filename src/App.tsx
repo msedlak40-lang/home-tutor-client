@@ -13,9 +13,11 @@ type GradeLevel = "K"|"1"|"2"|"3"|"4"|"5"|"6"|"7"|"8";
 type FontSize = "sm"|"md"|"lg"|"xl";
 type LineSpacing = 1.6|1.8|2.0;
 
-const PROXY_URL = import.meta.env.VITE_PROXY_URL || "";
 const FONT_MAP: Record<FontSize, number> = { sm: 15, md: 17, lg: 19, xl: 21 };
 const GRADES: GradeLevel[] = ["K","1","2","3","4","5","6","7","8"];
+
+// Relative (same-origin) Netlify Function by default
+const PROXY_URL = import.meta.env.VITE_PROXY_URL || "";
 
 // KaTeX for inline $...$ and block $$...$$
 marked.use(markedKatex({ throwOnError: false }));
@@ -45,8 +47,6 @@ interface Profile {
   grade: GradeLevel;
   dyslexiaAssist: boolean;
 }
-
-// Defaults for first run
 const DEFAULT_PROFILES: Profile[] = [
   { id: "p1", name: "Daughter", grade: "6", dyslexiaAssist: true },
   { id: "p2", name: "Son", grade: "3", dyslexiaAssist: false },
@@ -63,7 +63,6 @@ async function ensureDB() {
     },
   });
 }
-
 async function saveSession(entry: {
   profileId: string;
   subject: string;
@@ -77,24 +76,21 @@ async function saveSession(entry: {
   await db.put("sessions", { id, createdAt: Date.now(), ...entry });
   return id;
 }
-
 async function updateSessionNotes(id: string, notes: { confusingWords?: string[]; wins?: string[] }) {
   const db = await ensureDB();
   const row: any = await db.get("sessions", id);
   if (!row) return;
   await db.put("sessions", { ...row, confusingWords: notes.confusingWords ?? row.confusingWords, wins: notes.wins ?? row.wins });
 }
-
 async function loadRecent(profileId: string, limit = 5) {
   const db = await ensureDB();
-  const store = db.transaction("sessions").store;
+  const store = db.transaction("sessions").store as any;
   const all = await store.getAll();
   return all
     .filter((r: any) => r.profileId === profileId)
     .sort((a: any, b: any) => b.createdAt - a.createdAt)
     .slice(0, limit);
 }
-
 async function clearHistory(profileId?: string) {
   const db = await ensureDB();
   if (!profileId) return db.clear("sessions");
@@ -104,7 +100,6 @@ async function clearHistory(profileId?: string) {
   for (const row of all) if (row.profileId === profileId) await store.delete(row.id);
   await tx.done;
 }
-
 async function exportSessions(profileId: string) {
   const db = await ensureDB();
   const all = await db.getAll("sessions");
@@ -115,7 +110,6 @@ async function exportSessions(profileId: string) {
   a.href = url; a.download = `sessions-${profileId}.json`; a.click();
   URL.revokeObjectURL(url);
 }
-
 async function importSessions(profileId: string, file: File) {
   const text = await file.text();
   const rows = JSON.parse(text);
@@ -162,7 +156,6 @@ async function syncToCloud(profileId: string) {
   if (error) alert(`Sync failed: ${error.message}`);
   else alert(`Synced ${count ?? rows.length} rows to cloud ✅`);
 }
-
 async function pullFromCloud(profileId: string) {
   const { data, error } = await supabase
     .from("sessions_cloud")
@@ -204,6 +197,24 @@ async function copy(text: string) {
   catch { alert("Couldn’t copy to clipboard."); }
 }
 
+// Build a prompt for generating a short practice test + answer key
+function buildTestPrompt(msg: string, grade: string, subject: string, dyslexia: boolean) {
+  const count =
+    grade === "K" || grade === "1" || grade === "2" ? 4 :
+    grade === "3" || grade === "4" ? 5 :
+    grade === "5" ? 6 : 8;
+  const style = dyslexia
+    ? "Use short sentences, plain words, clear formatting, and simple layout."
+    : "Keep it concise and clear.";
+  return `${msg}
+
+Please generate a short ${subject} practice test with ${count} numbered questions.
+- Do NOT include solutions next to the questions.
+- After the questions, add a section titled "Answer Key" with numbered answers only.
+- Prefer plain text; use simple LaTeX for math.
+${style}`;
+}
+
 // =============== Component ===============
 export default function App() {
   // ---------- Profiles store ----------
@@ -214,12 +225,9 @@ export default function App() {
   const [currentProfileId, setCurrentProfileId] = useState<string>(() => {
     return localStorage.getItem("currentProfileId") || "p1";
   });
-
-  // Derived current profile (kept for convenience with existing code)
   const currentProfile = profiles.find(p => p.id === currentProfileId) || profiles[0];
   const [profile, setProfile] = useState<Profile>(currentProfile);
 
-  // Persist profiles + current id; keep profile state in sync
   useEffect(() => { localStorage.setItem("profiles", JSON.stringify(profiles)); }, [profiles]);
   useEffect(() => { localStorage.setItem("currentProfileId", currentProfileId); }, [currentProfileId]);
   useEffect(() => {
@@ -250,6 +258,7 @@ export default function App() {
   const [subject, setSubject] = useState<Subject>("math");
   const [message, setMessage] = useState("I’m working on dividing fractions.");
   const [response, setResponse] = useState("");
+  const [showAnswers, setShowAnswers] = useState(true);
   const [recent, setRecent] = useState<any[]>([]);
   const [loading, setLoading] = useState(false);
 
@@ -283,39 +292,43 @@ export default function App() {
   async function callTutor(body: { subject: Subject; message: string }) {
     setLoading(true);
     try {
-const r = await fetch(`${PROXY_URL}/.netlify/functions/tutor`, {
-  method: "POST",
-  headers: { "Content-Type": "application/json" },
-  body: JSON.stringify({
-    profile: { grade: profile.grade, dyslexiaAssist: profile.dyslexiaAssist },
-    subject: body.subject,
-    message: body.message,
-  }),
-});
+      const r = await fetch(`${PROXY_URL}/.netlify/functions/tutor`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          profile: { grade: profile.grade, dyslexiaAssist: profile.dyslexiaAssist },
+          subject: body.subject,
+          message: body.message,
+        }),
+      });
       if (!r.ok) throw new Error("proxy");
       const json = await r.json();
       const text = json.text ?? "";
       setResponse(text);
+      setShowAnswers(true); // default to showing answers when present
 
       const id = await saveSession({
         profileId: profile.id, subject, prompt: message, response: text, confusingWords: [], wins: [],
       });
       setLastSessionId(id); setLastConfusing([]); setLastWins([]);
     } catch {
-      setResponse("Couldn’t reach the tutor proxy. Is http://localhost:8787 running?");
+      setResponse("Couldn’t reach the tutor proxy.");
     } finally { setLoading(false); }
   }
+
   const ask = () => callTutor({ subject, message });
-  const askWith = (mode: "simplify" | "steps" | "hint") =>
+
+  const askWith = (mode: "simplify" | "steps" | "hint" | "test") =>
     callTutor({
       subject,
       message:
-        message + "\n\n" +
-        (mode === "simplify"
-          ? "Please simplify the explanation even more."
+        mode === "simplify"
+          ? message + "\n\nPlease simplify the explanation even more."
           : mode === "steps"
-          ? "Show numbered steps with one action per line."
-          : "Give me one helpful hint, not the full answer."),
+          ? message + "\n\nShow numbered steps with one action per line."
+          : mode === "hint"
+          ? message + "\n\nGive me one helpful hint, not the full answer."
+          : buildTestPrompt(message, profile.grade, subject, profile.dyslexiaAssist),
     });
 
   async function showRecent() { setRecent(await loadRecent(profile.id, 5)); }
@@ -343,31 +356,22 @@ const r = await fetch(`${PROXY_URL}/.netlify/functions/tutor`, {
     await updateSessionNotes(lastSessionId, { wins: next });
   }
 
-  // ---------- Profiles screen state ----------
+  // ---------- Profiles UI toggle ----------
   type View = "chat" | "profiles";
   const [view, setView] = useState<View>("chat");
-
-  // Helpers for Profiles screen
   const emptyDraft: Profile = { id: "", name: "", grade: "3", dyslexiaAssist: false };
   const [draft, setDraft] = useState<Profile>(emptyDraft);
   const [editingId, setEditingId] = useState<string | null>(null);
 
   function startAdd() {
-    const pin = prompt("Parent PIN:");
-    if (pin !== parentPin) { alert("Incorrect PIN."); return; }
-    setEditingId(null);
-    setDraft({ ...emptyDraft, id: crypto.randomUUID() });
+    const pin = prompt("Parent PIN:"); if (pin !== parentPin) { alert("Incorrect PIN."); return; }
+    setEditingId(null); setDraft({ ...emptyDraft, id: crypto.randomUUID() });
   }
   function startEdit(p: Profile) {
-    const pin = prompt("Parent PIN:");
-    if (pin !== parentPin) { alert("Incorrect PIN."); return; }
-    setEditingId(p.id);
-    setDraft({ ...p });
+    const pin = prompt("Parent PIN:"); if (pin !== parentPin) { alert("Incorrect PIN."); return; }
+    setEditingId(p.id); setDraft({ ...p });
   }
-  function cancelEdit() {
-    setEditingId(null);
-    setDraft(emptyDraft);
-  }
+  function cancelEdit() { setEditingId(null); setDraft(emptyDraft); }
   function saveDraft() {
     if (!draft.name.trim()) return alert("Please enter a name.");
     if (!GRADES.includes(draft.grade)) return alert("Choose a grade.");
@@ -376,15 +380,13 @@ const r = await fetch(`${PROXY_URL}/.netlify/functions/tutor`, {
       if (currentProfileId === editingId) setProfile({ ...draft });
     } else {
       setProfiles(prev => [...prev, { ...draft }]);
-      // if it's the first profile ever, select it
       if (profiles.length === 0) setCurrentProfileId(draft.id);
     }
     cancelEdit();
   }
   function removeProfile(id: string) {
-    const pin = prompt("Parent PIN:");
-    if (pin !== parentPin) { alert("Incorrect PIN."); return; }
-    if (!confirm("Delete this profile? This won't delete saved sessions.")) return;
+    const pin = prompt("Parent PIN:"); if (pin !== parentPin) { alert("Incorrect PIN."); return; }
+    if (!confirm("Delete this profile?")) return;
     setProfiles(prev => prev.filter(p => p.id !== id));
     if (currentProfileId === id) {
       const remaining = profiles.filter(p => p.id !== id);
@@ -408,7 +410,6 @@ const r = await fetch(`${PROXY_URL}/.netlify/functions/tutor`, {
         <button className="btn btn-outline" onClick={() => setView(view === "chat" ? "profiles" : "chat")}>
           {view === "chat" ? "Profiles" : "Back to Tutor"}
         </button>
-        {canInstall && (<button onClick={installPWA} className="btn btn-outline">Install App</button>)}
         <button onClick={testSupabase} className="btn btn-outline">Test Supabase</button>
         <div className="ml-auto flex items-center gap-2 text-sm">
           <span>Theme:</span>
@@ -420,7 +421,7 @@ const r = await fetch(`${PROXY_URL}/.netlify/functions/tutor`, {
         </div>
       </header>
 
-      {/* Settings row (global controls) */}
+      {/* Global settings */}
       <section className="card mb-3">
         <div className="flex items-center gap-3 flex-wrap">
           <label className="flex items-center gap-2">
@@ -453,8 +454,6 @@ const r = await fetch(`${PROXY_URL}/.netlify/functions/tutor`, {
             <div className="text-lg font-semibold">Profiles</div>
             <button className="btn btn-primary" onClick={startAdd}>Add Profile</button>
           </div>
-
-          {/* Profile cards */}
           <div className="grid gap-3">
             {profiles.map(p => (
               <div key={p.id} className="p-3 rounded-xl border flex items-center justify-between">
@@ -471,41 +470,28 @@ const r = await fetch(`${PROXY_URL}/.netlify/functions/tutor`, {
                 </div>
               </div>
             ))}
-            {profiles.length === 0 && (
-              <div className="opacity-70 text-sm">No profiles yet. Click “Add Profile”.</div>
-            )}
+            {profiles.length === 0 && <div className="opacity-70 text-sm">No profiles yet. Click “Add Profile”.</div>}
           </div>
 
-          {/* Editor */}
           {(editingId !== null || draft.id) && (
             <div className="mt-4 p-3 rounded-xl border">
               <div className="font-medium mb-2">{editingId ? "Edit Profile" : "New Profile"}</div>
               <div className="flex flex-wrap gap-3">
                 <label className="flex items-center gap-2">
                   <span>Name</span>
-                  <input
-                    className="border rounded px-2 py-1"
-                    value={draft.name}
-                    onChange={e=>setDraft({ ...draft, name: e.target.value })}
-                    placeholder="e.g., Daughter"
-                  />
+                  <input className="border rounded px-2 py-1" value={draft.name}
+                    onChange={e=>setDraft({ ...draft, name: e.target.value })} placeholder="e.g., Daughter"/>
                 </label>
                 <label className="flex items-center gap-2">
                   <span>Grade</span>
-                  <select
-                    className="border rounded px-2 py-1"
-                    value={draft.grade}
-                    onChange={e=>setDraft({ ...draft, grade: e.target.value as GradeLevel })}
-                  >
+                  <select className="border rounded px-2 py-1" value={draft.grade}
+                    onChange={e=>setDraft({ ...draft, grade: e.target.value as GradeLevel })}>
                     {GRADES.map(g => <option key={g} value={g}>{g}</option>)}
                   </select>
                 </label>
                 <label className="flex items-center gap-2">
-                  <input
-                    type="checkbox"
-                    checked={draft.dyslexiaAssist}
-                    onChange={e=>setDraft({ ...draft, dyslexiaAssist: e.target.checked })}
-                  />
+                  <input type="checkbox" checked={draft.dyslexiaAssist}
+                    onChange={e=>setDraft({ ...draft, dyslexiaAssist: e.target.checked })}/>
                   <span>Dyslexia Assist</span>
                 </label>
               </div>
@@ -584,6 +570,8 @@ const r = await fetch(`${PROXY_URL}/.netlify/functions/tutor`, {
                 className={`btn btn-outline ${loading ? "opacity-50 cursor-not-allowed" : ""}`}>Show steps</button>
               <button onClick={() => askWith("hint")} disabled={loading}
                 className={`btn btn-outline ${loading ? "opacity-50 cursor-not-allowed" : ""}`}>Hint</button>
+              <button onClick={() => askWith("test")} disabled={loading}
+                className={`btn btn-outline ${loading ? "opacity-50 cursor-not-allowed" : ""}`}>Generate Test</button>
 
               {response && (
                 <>
@@ -594,16 +582,49 @@ const r = await fetch(`${PROXY_URL}/.netlify/functions/tutor`, {
             </div>
           </section>
 
-          {/* Answer card */}
+          {/* Answer card (split Questions vs Answer Key) */}
           {response && (
             <section className="card mb-3 p-4">
-              <div
-                className={`${profile.dyslexiaAssist ? "dyslexia-on" : ""} answer-body`}
-                style={{ lineHeight: lineSpacing }}
-                dangerouslySetInnerHTML={{
-                  __html: DOMPurify.sanitize(marked.parse(normalizeMath(response)) as string),
-                }}
-              />
+              {(() => {
+                const split = response.split(/^\s*#{0,3}\s*Answer Key\s*:?\s*$/im);
+                const hasKey = split.length > 1;
+                const qText  = split[0];
+                const aText  = hasKey ? split.slice(1).join("\n").trim() : "";
+
+                return (
+                  <>
+                    {/* Questions */}
+                    <div
+                      className={`${profile.dyslexiaAssist ? "dyslexia-on" : ""} answer-body`}
+                      style={{ lineHeight: lineSpacing }}
+                      dangerouslySetInnerHTML={{
+                        __html: DOMPurify.sanitize(marked.parse(normalizeMath(qText)) as string),
+                      }}
+                    />
+
+                    {/* Answer Key */}
+                    {hasKey && (
+                      <div className="mt-4">
+                        <div className="flex items-center justify-between">
+                          <h3 className="text-lg font-semibold">Answer Key</h3>
+                          <button className="btn btn-outline" onClick={() => setShowAnswers(v => !v)}>
+                            {showAnswers ? "Hide answers" : "Show answers"}
+                          </button>
+                        </div>
+                        {showAnswers && (
+                          <div
+                            className={`${profile.dyslexiaAssist ? "dyslexia-on" : ""} answer-body mt-2`}
+                            style={{ lineHeight: lineSpacing }}
+                            dangerouslySetInnerHTML={{
+                              __html: DOMPurify.sanitize(marked.parse(normalizeMath(aText)) as string),
+                            }}
+                          />
+                        )}
+                      </div>
+                    )}
+                  </>
+                );
+              })()}
             </section>
           )}
 
