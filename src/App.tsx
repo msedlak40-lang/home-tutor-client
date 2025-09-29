@@ -269,16 +269,6 @@ export default function App() {
   const [lastConfusing, setLastConfusing] = useState<string[]>([]);
   const [lastWins, setLastWins] = useState<string[]>([]);
 
-  // PWA install
-  const [canInstall, setCanInstall] = useState(false);
-  const deferredPromptRef = useRef<any>(null);
-  useEffect(() => {
-    function onBeforeInstallPrompt(e: any) { e.preventDefault(); deferredPromptRef.current = e; setCanInstall(true); }
-    window.addEventListener("beforeinstallprompt", onBeforeInstallPrompt);
-    return () => window.removeEventListener("beforeinstallprompt", onBeforeInstallPrompt);
-  }, []);
-  async function installPWA() { const evt = deferredPromptRef.current; if (!evt) return; setCanInstall(false); await evt.prompt(); deferredPromptRef.current = null; }
-
   // Supabase smoke test
   async function testSupabase() {
     try {
