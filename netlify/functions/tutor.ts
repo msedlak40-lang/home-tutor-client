@@ -124,39 +124,66 @@ ${profile.dyslexiaAssist ? "Want me to read this out loud?" : ""}`;
     return json(200, { text });
   }
 
-  // ---- openai mode ----
-  if (MODE === "openai") {
-    if (!OPENAI_API_KEY) return json(500, { error: "missing_openai_key" });
-    try {
-      const r = await fetch("https://api.openai.com/v1/chat/completions", {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${OPENAI_API_KEY}`,
-        },
-        body: JSON.stringify({
-          model: "gpt-4o-mini",
-          messages: [
-            { role: "system", content: buildSystem(profile, subject) },
-            { role: "user", content: `Subject: ${subject}\nStudent: ${message}` },
-          ],
-          max_tokens: 220,
-          temperature: 0.2,
-        }),
-      });
+// ---- openai mode ----
+if (MODE === "openai") {
+  if (!OPENAI_API_KEY) return json(500, { error: "missing_openai_key" });
 
-      if (!r.ok) {
-        const err = await r.text().catch(() => "");
-        return json(502, { error: "openai_bad_response", detail: err });
-      }
+  const MAX_TOKENS = Math.min(
+    Number(process.env.OPENAI_MAX_TOKENS ?? 1500),
+    4000 // safety cap
+  );
 
-      const data: any = await r.json();
-      const text = data.choices?.[0]?.message?.content ?? "Sorry, try again.";
-      return json(200, { text });
-    } catch (e: any) {
-      return json(500, { error: "openai_error", detail: String(e?.message ?? e) });
+  const baseMessages = [
+    { role: "system", content: buildSystem(profile, subject) },
+    { role: "user", content: `Subject: ${subject}\nStudent: ${message}` },
+  ] as const;
+
+  async function getChunk(msgs: any[]) {
+    const r = await fetch("https://api.openai.com/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${OPENAI_API_KEY}`,
+      },
+      body: JSON.stringify({
+        model: "gpt-4o-mini",
+        messages: msgs,
+        max_tokens: MAX_TOKENS,   // ⬅ increase output budget here
+        temperature: 0.2,
+      }),
+    });
+    if (!r.ok) {
+      const err = await r.text().catch(() => "");
+      return { error: `openai_bad_response`, detail: err } as const;
+    }
+    const data: any = await r.json();
+    const choice = data.choices?.[0];
+    const text = choice?.message?.content ?? "";
+    const finish = choice?.finish_reason ?? "stop";
+    return { text, finish } as const;
+  }
+
+  // First chunk
+  const first = await getChunk(baseMessages);
+  if ("error" in first) return json(502, first);
+  let output = first.text;
+
+  // If the model hit the token limit, ask it to continue once
+  if (first.finish === "length") {
+    const contMsgs = [
+      ...baseMessages,
+      { role: "assistant", content: first.text },
+      { role: "user", content: "Please continue from where you left off." },
+    ];
+    const second = await getChunk(contMsgs);
+    if (!("error" in second)) {
+      output += (output && second.text ? "\n" : "") + second.text;
     }
   }
+
+  return json(200, { text: output || "Sorry, try again." });
+}
+
 
   return json(500, { error: "llm_not_configured" });
 };
