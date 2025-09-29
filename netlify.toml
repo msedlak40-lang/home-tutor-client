@@ -2,6 +2,9 @@
   command = "pnpm build"
   publish = "dist"
 
+[functions]
+  node_bundler = "esbuild"
+
 [build.environment]
   NODE_VERSION = "22"
 
